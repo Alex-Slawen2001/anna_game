@@ -7,20 +7,11 @@
 ║   Запуск:  python main.py                                    ║
 ║   Управление: мышь. Пробел/Enter — пропустить печать текста. ║
 ║   F11 — полный экран, M — музыка вкл/выкл, Esc — выход.      ║
-║                                                              ║
-║   НОВОЕ:                                                     ║
-║   • Показатели (Энергия/Уверенность) видны во всех сценах.   ║
-║   • Кнопка «Пропустить ▸▸» в диалоге — сразу к экзамену.     ║
-║   • Динамические вопросы: на каждом экзамене случайная       ║
-║     выборка из пула курса + перемешивание вариантов.         ║
-║   • Внешний банк assets/question_bank.json (напр. ФМЗА):     ║
-║     подхватывается автоматически, если файл есть.            ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 import os
 import sys
 import math
-import json
 import random
 import datetime
 
@@ -31,6 +22,10 @@ from content import (
     CHARACTER_COLORS, CHARACTER_PHOTOS,
     YEARS, FINAL_EXAMS, FINALE_SCENES, FINALE_LETTER,
 )
+import exam_builder
+import live_questions
+import save as savemod
+from achievements import ACHIEVEMENTS, ACH_ORDER
 
 # ══════════════════════════════ КОНСТАНТЫ ══════════════════════════════
 W, H = 1280, 720
@@ -41,8 +36,6 @@ PHOTO_DIR = os.path.join(BASE_DIR, "assets", "photos")
 FONT_DIR = os.path.join(BASE_DIR, "assets", "fonts")
 MUSIC_DIR = os.path.join(BASE_DIR, "assets", "music")
 BOOKING_FILE = os.path.join(BASE_DIR, "booking.txt")
-# Внешний банк вопросов (например, выгрузка ФМЗА). Необязателен.
-BANK_FILE = os.path.join(BASE_DIR, "assets", "question_bank.json")
 
 # Музыка по состояниям. Клади файлы в assets/music/ с этими именами.
 # Форматы: .mp3, .ogg, .wav. Если файла нет — просто тишина, ошибок не будет.
@@ -174,161 +167,6 @@ def heart(surf, cx, cy, size, color, alpha=255):
     s = pygame.Surface((W, H), pygame.SRCALPHA)
     pygame.draw.polygon(s, (*color, alpha), pts)
     surf.blit(s, (0, 0))
-
-
-# ══════════════════════════════ БАНК ВОПРОСОВ ══════════════════════════════
-#
-#  КОНЦЕПЦИЯ ДИНАМИЧЕСКИХ ВОПРОСОВ
-#  ─────────────────────────────
-#  У каждого курса (и финального экзамена) есть набор тем — "topics".
-#  Вопросы берутся ТОЛЬКО из тем этого курса, поэтому «выйти за перечень»
-#  невозможно: 1 курс не спросит про хирургию.
-#
-#  Источники вопросов складываются в один пул на экзамен:
-#    1) встроенные exam["questions"] из content.py   (всегда есть)
-#    2) внешний банк assets/question_bank.json        (если файл существует)
-#
-#  При КАЖДОМ запуске экзамена из пула берётся случайное подмножество
-#  (exam["pick"] штук) и у каждого вопроса перемешиваются варианты ответов.
-#  → игрок каждый раз видит разные вопросы в разном порядке.
-#
-#  Чтобы наполнить банк из аккредитации (ФМЗА): выгрузи вопросы в JSON вида
-#    {
-#      "anatomy": [
-#         {"q": "...", "a": ["...","..."], "correct": 0, "fact": "..."},
-#         ...
-#      ],
-#      "pharmacology": [ ... ]
-#    }
-#  Ключи ("anatomy", ...) — это темы, они привязаны к курсам ниже.
-
-# Какие темы у какого курса. Индекс = позиция курса в YEARS.
-COURSE_TOPICS = {
-    0: ["anatomy", "latin"],                       # 1 курс
-    1: ["physiology", "biochemistry", "microbiology"],  # 2 курс
-    2: ["pharmacology"],                           # 3 курс
-    3: ["surgery", "internal", "obstetrics"],      # 4 курс
-    4: ["emergency", "neurology", "internal"],     # 5 курс
-    5: [],                                          # 6 курс — экзамена нет
-}
-
-# Темы финальных экзаменов (по названию экзамена из content.py).
-FINAL_TOPICS = {
-    "Реабилитация человека": ["rehabilitation"],
-    # «Аккредитация» и «Тестовая часть» специально тянут вопросы за все курсы —
-    # это и есть «общий банк». Пустой список ниже = разрешить все темы.
-    "Аккредитация": ["*"],
-    "Тестовая часть": ["*"],
-}
-
-# Сколько вопросов вытягивать на экзамен, если не задано в content.py явно.
-DEFAULT_PICK = 6
-
-_QUESTION_BANK = None  # кэш загруженного внешнего банка
-
-
-def load_question_bank():
-    """Читает assets/question_bank.json один раз. Нет файла — просто {}."""
-    global _QUESTION_BANK
-    if _QUESTION_BANK is not None:
-        return _QUESTION_BANK
-    bank = {}
-    if os.path.isfile(BANK_FILE):
-        try:
-            with open(BANK_FILE, encoding="utf-8") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict):
-                for topic, items in raw.items():
-                    good = [q for q in items if _valid_question(q)]
-                    if good:
-                        bank[topic] = good
-            print(f"[банк] загружено тем: {len(bank)}, "
-                  f"вопросов: {sum(len(v) for v in bank.values())}")
-        except Exception as e:
-            print(f"[банк] не удалось прочитать {BANK_FILE}: {e}")
-    _QUESTION_BANK = bank
-    return bank
-
-
-def _valid_question(q):
-    """Мягкая проверка структуры вопроса, чтобы битые записи не роняли игру."""
-    try:
-        return (isinstance(q.get("q"), str)
-                and isinstance(q.get("a"), list) and len(q["a"]) >= 2
-                and isinstance(q.get("correct"), int)
-                and 0 <= q["correct"] < len(q["a"]))
-    except Exception:
-        return False
-
-
-def _shuffle_answers(q):
-    """Возвращает копию вопроса с перемешанными вариантами и пересчитанным correct."""
-    a = list(q["a"])
-    idx = list(range(len(a)))
-    random.shuffle(idx)
-    correct_val = q["a"][q["correct"]]
-    new_a = [a[i] for i in idx]
-    return {
-        "q": q["q"],
-        "a": new_a,
-        "correct": new_a.index(correct_val),
-        "fact": q.get("fact", ""),
-    }
-
-
-def build_exam_questions(exam, topics):
-    """
-    Собирает финальный список вопросов для одного прохождения экзамена.
-    Пул = встроенные вопросы + внешний банк по разрешённым темам.
-    Затем случайная выборка pick штук и перемешивание ответов.
-    topics: список тем этого курса; ["*"] — разрешены все темы банка.
-    """
-    bank = load_question_bank()
-    seen = set()
-
-    def clean(items):
-        out = []
-        for q in items:
-            key = q.get("q", "").strip()
-            if _valid_question(q) and key and key not in seen:
-                seen.add(key)
-                out.append(q)
-        return out
-
-    # Группы, из которых тянем поровну.
-    # Первая группа — встроенные вопросы курса (они всегда «в перечне»).
-    groups = []
-    base = clean(exam.get("questions", []))
-    if base:
-        groups.append(base)
-    topic_names = list(bank.keys()) if topics == ["*"] else topics
-    for t in topic_names:
-        g = clean(bank.get(t, []))
-        if g:
-            groups.append(g)
-
-    total = sum(len(g) for g in groups)
-    if total == 0:
-        return []
-
-    # Сколько вопросов на экзамен: ключ "pick" из content.py,
-    # иначе — исходное число вопросов курса.
-    pick = exam.get("pick", len(exam.get("questions", [])) or DEFAULT_PICK)
-    pick = max(1, min(pick, total))
-
-    # Раздаём места по кругу между темами → сбалансированная выборка,
-    # чтобы не выпали, например, одни акушерские вопросы подряд.
-    for g in groups:
-        random.shuffle(g)
-    chosen, gi = [], 0
-    while len(chosen) < pick:
-        g = groups[gi % len(groups)]
-        if g:
-            chosen.append(g.pop())
-        gi += 1
-
-    random.shuffle(chosen)
-    return [_shuffle_answers(q) for q in chosen]
 
 
 # ══════════════════════════════ ФОН ══════════════════════════════
@@ -696,6 +534,95 @@ class Transition:
                       center=True, alpha=int(255 * clamp((a - 0.35) / 0.65, 0, 1)))
 
 
+# ══════════════════════════════ ДОСТИЖЕНИЯ (тосты) ══════════════════════════════
+def _draw_ach_icon(surf, kind, cx, cy, r, color):
+    if kind == "star" or kind == "trophy" or kind == "perfectionist":
+        pts = []
+        for i in range(10):
+            ang = -math.pi / 2 + i * math.pi / 5
+            rr = r if i % 2 == 0 else r * 0.45
+            pts.append((cx + math.cos(ang) * rr, cy + math.sin(ang) * rr))
+        pygame.draw.polygon(surf, color, pts)
+    elif kind == "heart":
+        heart(surf, cx, cy, r * 1.1, color, 255)
+    elif kind == "moon":
+        pygame.draw.circle(surf, color, (cx, cy), r)
+        pygame.draw.circle(surf, mix(color, BLACK, 0.7), (int(cx + r * 0.4), cy), r)
+    elif kind == "cross":
+        w = r * 0.5
+        pygame.draw.rect(surf, color, (cx - w / 2, cy - r, w, 2 * r), border_radius=3)
+        pygame.draw.rect(surf, color, (cx - r, cy - w / 2, 2 * r, w), border_radius=3)
+    elif kind == "bolt":
+        pygame.draw.polygon(surf, color, [
+            (cx + r * 0.2, cy - r), (cx - r * 0.5, cy + r * 0.15),
+            (cx, cy + r * 0.1), (cx - r * 0.2, cy + r),
+            (cx + r * 0.5, cy - r * 0.15), (cx, cy - r * 0.1)])
+    elif kind == "flask":
+        pygame.draw.polygon(surf, color, [
+            (cx - r * 0.3, cy - r), (cx - r * 0.3, cy - r * 0.2),
+            (cx - r * 0.7, cy + r), (cx + r * 0.7, cy + r),
+            (cx + r * 0.3, cy - r * 0.2), (cx + r * 0.3, cy - r)], 0)
+        pygame.draw.line(surf, mix(color, WHITE, 0.5),
+                         (cx - r * 0.3, cy - r), (cx + r * 0.3, cy - r), 3)
+    elif kind == "spark":
+        for ang in range(0, 360, 45):
+            a = math.radians(ang)
+            pygame.draw.line(surf, color, (cx, cy),
+                             (cx + math.cos(a) * r, cy + math.sin(a) * r), 3)
+    elif kind == "people":
+        pygame.draw.circle(surf, color, (int(cx - r * 0.4), int(cy - r * 0.2)), int(r * 0.35))
+        pygame.draw.circle(surf, color, (int(cx + r * 0.4), int(cy - r * 0.2)), int(r * 0.35))
+        pygame.draw.circle(surf, color, (int(cx - r * 0.4), int(cy + r * 0.5)), int(r * 0.5))
+        pygame.draw.circle(surf, color, (int(cx + r * 0.4), int(cy + r * 0.5)), int(r * 0.5))
+    else:  # book
+        pygame.draw.rect(surf, color, (cx - r * 0.7, cy - r * 0.6, r * 1.4, r * 1.2),
+                         border_radius=3)
+        pygame.draw.line(surf, mix(color, BLACK, 0.6), (cx, cy - r * 0.6), (cx, cy + r * 0.6), 2)
+
+
+class Toasts:
+    def __init__(self):
+        self.queue = []
+        self.active = []
+
+    def push(self, key):
+        self.queue.append({"key": key, "t": 0.0, "life": 4.2})
+
+    def update(self, dt):
+        if self.queue and len(self.active) < 2:
+            self.active.append(self.queue.pop(0))
+        for a in self.active:
+            a["t"] += dt
+        self.active = [a for a in self.active if a["t"] < a["life"]]
+
+    def draw(self, surf):
+        for i, a in enumerate(self.active):
+            info = ACHIEVEMENTS.get(a["key"], {})
+            k = a["t"] / a["life"]
+            if k < 0.12:
+                slide = ease_out(k / 0.12)
+            elif k > 0.85:
+                slide = ease_out((1 - k) / 0.15)
+            else:
+                slide = 1.0
+            slide = clamp(slide, 0, 1)
+            w, h = 340, 78
+            x = W - 20 - w + int((1 - slide) * (w + 40))
+            y = 90 + i * (h + 12)
+            rect = pygame.Rect(x, y, w, h)
+            panel(surf, rect, (22, 24, 40), radius=16, alpha=int(240 * slide),
+                  border=GOLD, bw=2)
+            glow_circle(surf, (x + 40, y + h // 2), 26, GOLD,
+                        strength=int(30 * slide), layers=3)
+            _draw_ach_icon(surf, info.get("icon", "book"), x + 40, y + h // 2, 18, GOLD)
+            draw_text(surf, "Достижение получено", F(12, True), GOLD,
+                      x + 74, y + 14, alpha=int(255 * slide))
+            draw_text(surf, info.get("title", ""), F(19, True), CREAM,
+                      x + 74, y + 30, alpha=int(255 * slide))
+            draw_text(surf, info.get("desc", ""), F(13), DIM,
+                      x + 74, y + 55, alpha=int(230 * slide))
+
+
 # ══════════════════════════════ МУЗЫКА ══════════════════════════════
 class Music:
     """Плавная смена фоновых треков по состояниям. Отсутствие файла — не ошибка."""
@@ -761,6 +688,7 @@ class Game:
         self.tr = Transition()
         self.por = Portraits()
         self.music = Music()
+        self.toasts = Toasts()
 
         self.state = "MENU"
         self.buttons = []
@@ -771,6 +699,11 @@ class Game:
         self.energy = 100
         self.confidence = 50
         self.results = {}
+        self.earned = set()
+        self.flawless_streak = 0
+        self.night_studier = False
+
+        live_questions.start_fetching()
 
         self.scenes = []
         self.si = 0
@@ -778,11 +711,8 @@ class Game:
         self.speaker = None
         self.after_story = None
         self.choice_reply = None
-        self.skippable = True          # можно ли пропустить текущий диалог
-        self.skip_btn = None           # кнопка «Пропустить» (живёт отдельно)
 
         self.exam = None
-        self.exam_src = None
         self.qi = 0
         self.lives = 3
         self.correct = 0
@@ -790,6 +720,7 @@ class Game:
         self.q_timer = 0.0
         self.final_stage = 0
         self.shake = 0.0
+        self._skip_rect = None
 
         self.letter_t = 0.0
         self.time_input = ""
@@ -805,10 +736,45 @@ class Game:
         self.energy = 100
         self.confidence = 50
         self.results = {}
+        self.earned = set()
+        self.flawless_streak = 0
+        self.night_studier = False
         self.saved_time = None
         self.time_input = ""
         self.fx.p.clear()
+        savemod.clear()
         self.go("MENU", "")
+
+    def grant(self, key):
+        if key in self.earned:
+            return
+        self.earned.add(key)
+        self.toasts.push(key)
+        self.fx.burst(W - 60, 120, GOLD, 20)
+
+    def save_progress(self):
+        savemod.save({
+            "unlocked": self.unlocked,
+            "energy": self.energy,
+            "confidence": self.confidence,
+            "results": {str(k): v for k, v in self.results.items()},
+            "earned": list(self.earned),
+            "night_studier": self.night_studier,
+            "flawless_streak": self.flawless_streak,
+        })
+
+    def load_progress(self):
+        data = savemod.load()
+        if not data:
+            return False
+        self.unlocked = data.get("unlocked", 0)
+        self.energy = data.get("energy", 100)
+        self.confidence = data.get("confidence", 50)
+        self.results = {int(k): v for k, v in data.get("results", {}).items()}
+        self.earned = set(data.get("earned", []))
+        self.night_studier = data.get("night_studier", False)
+        self.flawless_streak = data.get("flawless_streak", 0)
+        return True
 
     # ─────────────────────── ХЕЛПЕРЫ ───────────────────────
     def go(self, state, label="", dur=0.55):
@@ -820,12 +786,14 @@ class Game:
 
     def _enter(self, state):
         track = {"MENU": "menu", "MAP": "story", "STORY": "story",
-                 "EXAM": "exam", "RESULT": "exam",
+                 "EXAM": "exam", "RESULT": "exam", "ACH": "menu",
                  "LETTER": "final", "INPUT": "final", "THANKS": "final"}.get(state)
         if track:
             self.music.play(track)
         if state == "MENU":
             self._menu()
+        elif state == "ACH":
+            self._ach_screen()
         elif state == "MAP":
             self._map()
         elif state == "STORY":
@@ -846,27 +814,72 @@ class Game:
     # ─────────────────────── МЕНЮ ───────────────────────
     def _menu(self):
         self.bg.set_theme((60, 45, 95), (255, 150, 180))
-        self.buttons = [
-            Button((W // 2 - 150, 470, 300, 58), "Начать путь", GOLD, 24, tag="start"),
-            Button((W // 2 - 150, 540, 300, 48), "Выход", (150, 150, 170), 20, tag="quit"),
-        ]
+        has = savemod.has_save()
+        self.buttons = []
+        y0 = 452
+        if has:
+            self.buttons.append(Button((W // 2 - 150, y0, 300, 54), "Продолжить", GOLD, 23, tag="continue"))
+            y0 += 64
+            self.buttons.append(Button((W // 2 - 150, y0, 300, 50), "Начать заново", (200, 160, 190), 20, tag="restart"))
+            y0 += 60
+        else:
+            self.buttons.append(Button((W // 2 - 150, y0, 300, 58), "Начать путь", GOLD, 24, tag="start"))
+            y0 += 68
+        self.buttons.append(Button((W // 2 - 150, y0, 300, 46), "Достижения", (150, 180, 220), 19, tag="ach"))
+        y0 += 56
+        self.buttons.append(Button((W // 2 - 150, y0, 300, 44), "Выход", (150, 150, 170), 19, tag="quit"))
 
     def draw_menu(self, s):
         t = self.time
         f1 = F(76, True)
         f2 = F(26)
         f3 = F(18)
-        glow_circle(s, (W // 2, 210), 150, (255, 150, 180), strength=70, layers=6)
+        glow_circle(s, (W // 2, 200), 150, (255, 150, 180), strength=70, layers=6)
         p = 1 + 0.03 * math.sin(t * 2.4)
-        heart(s, W // 2, 190, 46 * p, (255, 110, 150), 235)
-        draw_text(s, "ШЕСТЬ ЛЕТ", f1, CREAM, W // 2, 300, center=True)
-        draw_text(s, f"история {HERO}", f2, mix(CREAM, GOLD, 0.5), W // 2, 352, center=True)
-        draw_text(s, UNIVERSITY, f3, DIM, W // 2, 392, center=True)
+        heart(s, W // 2, 180, 46 * p, (255, 110, 150), 235)
+        draw_text(s, "ШЕСТЬ ЛЕТ", f1, CREAM, W // 2, 288, center=True)
+        draw_text(s, f"история {HERO}", f2, mix(CREAM, GOLD, 0.5), W // 2, 340, center=True)
+        draw_text(s, UNIVERSITY, f3, DIM, W // 2, 380, center=True)
         for i, name in enumerate([V, N, K]):
-            self.por.draw(s, name, 190 + i * 120, 610, 78, active=False, bob=t * 2 + i)
-        self.por.draw(s, HERO, W - 190, 600, 110, active=True, bob=t * 2)
-        draw_text(s, "мышь — выбор  ·  F11 — полный экран  ·  M — музыка вкл/выкл  ·  Esc — выход",
-                  F(15), (110, 115, 135), W // 2, H - 42, center=True)
+            self.por.draw(s, name, 150 + i * 110, 632, 70, active=False, bob=t * 2 + i)
+        self.por.draw(s, HERO, W - 175, 624, 96, active=True, bob=t * 2)
+        if savemod.has_save():
+            got = len(self.earned)
+            draw_text(s, f"собрано достижений: {got} / {len(ACHIEVEMENTS)}",
+                      F(14), (150, 155, 175), W // 2, H - 62, center=True)
+        draw_text(s, "мышь · F11 — экран · M — музыка · S — пропуск диалога · Esc — выход",
+                  F(14), (110, 115, 135), W // 2, H - 38, center=True)
+
+    # ─────────────────────── ДОСТИЖЕНИЯ ───────────────────────
+    def _ach_screen(self):
+        self.bg.set_theme((40, 40, 70), (255, 200, 130))
+        self.buttons = [Button((W // 2 - 110, H - 76, 220, 48), "Назад", (170, 170, 190), 20, tag="menu_back")]
+
+    def draw_ach(self, s):
+        draw_text(s, "ДОСТИЖЕНИЯ", F(46, True), CREAM, W // 2, 62, center=True)
+        got = len(self.earned)
+        draw_text(s, f"{got} из {len(ACHIEVEMENTS)}", F(20), mix(CREAM, GOLD, 0.5),
+                  W // 2, 108, center=True)
+        cols, cw, ch, gap = 2, 500, 92, 18
+        x0 = W // 2 - (cols * cw + (cols - 1) * gap) // 2
+        y0 = 150
+        for idx, key in enumerate(ACH_ORDER):
+            info = ACHIEVEMENTS[key]
+            col = idx % cols
+            row = idx // cols
+            rect = pygame.Rect(x0 + col * (cw + gap), y0 + row * (ch + gap), cw, ch)
+            unlocked = key in self.earned
+            base = (26, 30, 48) if unlocked else (18, 19, 28)
+            bord = GOLD if unlocked else (55, 58, 76)
+            panel(s, rect, base, radius=14, alpha=245, border=bord, bw=2)
+            icol = GOLD if unlocked else (70, 74, 92)
+            if unlocked:
+                glow_circle(s, (rect.x + 46, rect.centery), 26, GOLD, strength=26, layers=3)
+            _draw_ach_icon(s, info["icon"], rect.x + 46, rect.centery, 20, icol)
+            tcol = CREAM if unlocked else (95, 100, 120)
+            draw_text(s, info["title"], F(20, True), tcol, rect.x + 86, rect.y + 24)
+            draw_text(s, info["desc"] if unlocked else "— ещё не открыто —",
+                      F(15), DIM if unlocked else (80, 84, 104), rect.x + 86, rect.y + 52)
 
     # ─────────────────────── КАРТА ───────────────────────
     def _map(self):
@@ -911,36 +924,6 @@ class Game:
                       mix(CREAM, GOLD, 0.35), W // 2, 545, center=True)
         self._hud(s, 540)
 
-    def _hud_compact(self, s, corner="tl"):
-        """Компактные показатели, которые видны постоянно во всех сценах.
-        corner: 'tl' — верхний левый угол, 'tr' — верхний правый."""
-        pairs = [
-            ("Энергия", self.energy, (120, 220, 180)),
-            ("Уверенность", self.confidence, (255, 190, 120)),
-        ]
-        pw, ph = 194, 60
-        margin = 18
-        if corner == "tr":
-            px = W - pw - margin
-        else:
-            px = margin
-        py = 14
-        card = pygame.Rect(px, py, pw, ph)
-        panel(s, card, (14, 16, 26), radius=12, alpha=180, border=(60, 66, 88), bw=1)
-        bx = card.x + 12
-        bw_bar = pw - 24 - 34
-        for i, (label, val, col) in enumerate(pairs):
-            ry = card.y + 10 + i * 22
-            draw_text(s, label, F(12, True), DIM, bx, ry - 1)
-            bar = pygame.Rect(bx + 92, ry + 3, bw_bar - 92, 8)
-            panel(s, bar, (30, 34, 50), radius=4, alpha=230)
-            fill = bar.copy()
-            fill.width = int((bw_bar - 92) * clamp(val / 100, 0, 1))
-            if fill.width > 2:
-                panel(s, fill, col, radius=4)
-            draw_text(s, f"{int(clamp(val,0,100))}", F(13, True), col,
-                      card.right - 12, ry - 1, center=False)
-
     def _hud(self, s, y):
         for i, (label, val, col) in enumerate([
             ("Энергия", self.energy, (120, 220, 180)),
@@ -957,14 +940,12 @@ class Game:
             draw_text(s, f"{int(clamp(val,0,100))}", F(14, True), col, x + 210, y + 66)
 
     # ─────────────────────── НОВЕЛЛА ───────────────────────
-    def start_story(self, scenes, after, label="", skippable=True):
+    def start_story(self, scenes, after, label=""):
         self.scenes = list(scenes)
         self.si = 0
         self.typed = 0.0
         self.after_story = after
         self.choice_reply = None
-        self.skippable = skippable
-        self.skip_btn = None
         self.go("STORY", label)
 
     def _cur_scene(self):
@@ -993,26 +974,24 @@ class Game:
         if nxt and "choice" in nxt:
             self._choice_ui(nxt)
 
-    def _get_skip_btn(self):
-        """Ленивая кнопка «Пропустить» в правом верхнем углу сцены."""
-        if self.skip_btn is None:
-            self.skip_btn = Button((W - 208, 16, 190, 42),
-                                   "Пропустить  ▸▸", DIM, 17, tag="skip")
-        return self.skip_btn
-
     def _skip_story(self):
-        """Пропустить оставшийся диалог и сразу перейти к тому, что после него
-        (обычно — к экзамену). Показатели от невыбранных выборов не начисляются."""
-        if not self.skippable or self.tr.active:
-            return
-        after = self.after_story
-        self.after_story = None
-        self.scenes = []
-        self.si = 0
-        self.buttons = []
-        self.skip_btn = None
-        if after:
-            after()
+        guard = 0
+        while True:
+            guard += 1
+            if guard > 500:
+                return
+            sc = self._cur_scene()
+            if sc is None:
+                if self.after_story:
+                    self.after_story()
+                return
+            if "choice" in sc:
+                self.buttons = []
+                self._choice_ui(sc)
+                self.typed = 0.0
+                return
+            self.si += 1
+        # unreachable
 
     def _choice_ui(self, sc):
         self.buttons = []
@@ -1028,17 +1007,39 @@ class Game:
         op = sc["options"][i]
         self.energy = clamp(self.energy + op.get("energy", 0), 0, 100)
         self.confidence = clamp(self.confidence + op.get("confidence", 0), 0, 100)
+        txt = op.get("text", "").lower()
+        rpl = op.get("reply", "").lower()
+        if ("утра" in txt or "ноч" in txt or "утра" in rpl
+                or "4 утра" in rpl or "3:40" in rpl):
+            self.night_studier = True
         self.fx.burst(pygame.mouse.get_pos()[0], pygame.mouse.get_pos()[1],
                       self.cur_year()["accent"], 18)
         self.scenes[self.si] = {"who": None, "text": op.get("reply", "")}
         self.typed = 0.0
         self.buttons = []
 
+    def _mini_hud(self, s):
+        x0 = W - 250
+        y0 = 30
+        for i, (label, val, col) in enumerate([
+            ("Энергия", self.energy, (120, 220, 180)),
+            ("Уверенность", self.confidence, (255, 190, 120)),
+        ]):
+            yy = y0 + i * 26
+            draw_text(s, label, F(13), DIM, x0, yy)
+            bar = pygame.Rect(x0 + 96, yy + 4, 110, 9)
+            panel(s, bar, (30, 34, 50), radius=5, alpha=210)
+            fill = bar.copy()
+            fill.width = int(110 * clamp(val / 100, 0, 1))
+            if fill.width > 2:
+                panel(s, fill, col, radius=5)
+
     def draw_story(self, s):
         y = self.cur_year() if self.state == "STORY" and self.year_i < len(YEARS) else YEARS[-1]
         sc = self._cur_scene()
-        draw_text(s, y["title"].upper(), F(20, True), mix(CREAM, y["accent"], 0.5), 228, 22)
-        draw_text(s, y["subtitle"], F(15), DIM, 228, 50)
+        draw_text(s, y["title"].upper(), F(20, True), mix(CREAM, y["accent"], 0.5), 40, 34)
+        draw_text(s, y["subtitle"], F(15), DIM, 40, 62)
+        self._mini_hud(s)
         cast = [HERO] + y["cast"]
         who = sc.get("who") if sc else None
         n = len(cast)
@@ -1084,37 +1085,28 @@ class Game:
         pw = int((W - 160) * (self.si / max(1, len(self.scenes))))
         pygame.draw.rect(s, (60, 66, 88), (80, H - 40, W - 160, 3))
         pygame.draw.rect(s, y["accent"], (80, H - 40, pw, 3))
-        # Кнопка «Пропустить» — прыжок сразу к экзамену / продолжению.
-        if self.skippable:
-            self._get_skip_btn().draw(s)
+        # кнопка «Пропустить →»
+        self._skip_rect = pygame.Rect(W - 168, 92, 128, 34)
+        mouse = pygame.mouse.get_pos()
+        hov = self._skip_rect.collidepoint(mouse)
+        panel(s, self._skip_rect, mix((26, 28, 42), y["accent"], 0.14 if hov else 0.05),
+              radius=10, alpha=230, border=mix((70, 74, 96), y["accent"], 0.6 if hov else 0.2), bw=2)
+        draw_text(s, "Пропустить →", F(16, True),
+                  mix(CREAM, WHITE, 0.4) if hov else DIM,
+                  self._skip_rect.centerx, self._skip_rect.centery, center=True)
 
     # ─────────────────────── ЭКЗАМЕН ───────────────────────
-    def _topics_for(self, exam, final_stage):
-        """Какие темы разрешены этому экзамену — курс не выходит за свой перечень."""
-        if final_stage is None:
-            return COURSE_TOPICS.get(self.year_i, [])
-        return FINAL_TOPICS.get(exam.get("name", ""), [])
-
-    def start_exam(self, exam_src, accent, lives=3, timer=None, final_stage=None):
-        # exam_src — исходный экзамен из content.py (с полным набором вопросов).
-        # Храним его, чтобы пересдача тянула из полного пула, а не из выборки.
-        self.exam_src = exam_src
-        self.exam = dict(exam_src)
+    def start_exam(self, exam, accent, lives=3, timer=None, final_stage=None):
+        self.exam = dict(exam)
         self.exam["accent"] = accent
         self.exam["timer"] = timer
-        # Динамически собираем вопросы: выборка из пула курса + перемешивание.
-        # Если банк/пул пуст — откатываемся на встроенные вопросы как есть.
-        topics = self._topics_for(exam_src, final_stage)
-        dynamic = build_exam_questions(exam_src, topics)
-        if dynamic:
-            self.exam["questions"] = dynamic
         self.qi = 0
         self.lives = lives
         self.correct = 0
         self.answered = None
         self.q_timer = timer or 0
         self.final_stage = final_stage
-        self.go("EXAM", exam_src["name"], 0.6)
+        self.go("EXAM", exam["name"], 0.6)
 
     def _exam_ui(self):
         self.buttons = []
@@ -1182,7 +1174,7 @@ class Game:
         for i in range(self.lives):
             heart(s, 60 + i * 34, 46, 13, RED, 255)
         draw_text(s, f"Вопрос {self.qi+1} / {len(self.exam['questions'])}",
-                  F(17, True), DIM, 250, 38, center=False)
+                  F(17, True), DIM, W - 60, 46, center=True)
         if self.exam["timer"] and self.answered is None:
             frac = clamp(self.q_timer / self.exam["timer"], 0, 1)
             bar = pygame.Rect(W // 2 - 200, 100, 400, 8)
@@ -1260,30 +1252,58 @@ class Game:
     def _after_result(self):
         total = len(self.exam["questions"])
         score = self.correct / total
+        flawless = (self.correct == total)
+
+        self.grant("first_exam")
+        if flawless:
+            self.grant("flawless")
+            self.flawless_streak += 1
+        else:
+            self.flawless_streak = 0
+        if self.lives == 1:
+            self.grant("survivor")
+        if self.night_studier:
+            self.grant("night_watch")
+
         if self.final_stage is None:
             self.results[self.year_i] = score
             self.energy = clamp(self.energy + 15, 0, 100)
-            after = self.cur_year().get("after") or []
+            y = self.cur_year()
+            if y["num"] == 3:
+                self.grant("pharma")
+            if y["num"] == 4:
+                self.grant("friends")
+            if y["num"] == 5:
+                self.grant("burnout")
+            if self.flawless_streak >= 5:
+                self.grant("perfectionist")
+            after = y.get("after") or []
 
             def then():
                 self.unlocked = max(self.unlocked, self.year_i + 1)
                 if self.unlocked >= len(YEARS):
                     self.unlocked = len(YEARS) - 1
+                self.save_progress()
                 self.go("MAP", "")
             if after:
                 self.start_story(after, then, "")
             else:
                 then()
         else:
+            e = FINAL_EXAMS[self.final_stage]
+            if e.get("timer"):
+                self.grant("speed")
             nxt = self.final_stage + 1
             if nxt < len(FINAL_EXAMS):
                 self._launch_final(nxt)
             else:
-                self.start_story(FINALE_SCENES, lambda: self.go("LETTER", ""), "",
-                                 skippable=False)
+                self.grant("doctor")
+                savemod.clear()
+                self.start_story(FINALE_SCENES, lambda: self.go("LETTER", ""), "")
 
     def _launch_final(self, i):
-        e = FINAL_EXAMS[i]
+        e = dict(FINAL_EXAMS[i])
+        e["questions"] = exam_builder.build_final_exam(FINAL_EXAMS[i])
         self.bg.set_theme((20, 30, 60), e["accent"])
         self.start_exam(e, e["accent"], e.get("lives", 3), e.get("timer"), final_stage=i)
 
@@ -1378,17 +1398,21 @@ class Game:
     def _click(self, pos):
         if self.tr.active:
             return
-        # Кнопка «Пропустить» обрабатывается первой и отдельно от self.buttons.
-        if self.state == "STORY" and self.skippable and self.skip_btn \
-                and self.skip_btn.hovered(pos):
-            self._skip_story()
-            return
         for b in self.buttons:
             if not b.hovered(pos):
                 continue
             tag = b.tag
             if tag == "start":
                 self.go("MAP", "Сентябрь. Первый курс.")
+            elif tag == "continue":
+                self.load_progress()
+                self.go("MAP", "С возвращением")
+            elif tag == "restart":
+                self.reset()
+            elif tag == "ach":
+                self.go("ACH", "")
+            elif tag == "menu_back":
+                self.go("MENU", "")
             elif tag == "quit":
                 pygame.quit(); sys.exit()
             elif isinstance(tag, tuple) and tag[0] == "year":
@@ -1407,11 +1431,13 @@ class Game:
                 self._after_result()
             elif tag == "retry":
                 self.energy = clamp(self.energy - 10, 0, 100)
-                # Пересдаём из ИСХОДНОГО экзамена → новая случайная выборка вопросов.
-                self.start_exam(self.exam_src, self.exam["accent"],
-                                3 if self.final_stage is None
-                                else FINAL_EXAMS[self.final_stage].get("lives", 3),
-                                self.exam.get("timer"), self.final_stage)
+                if self.final_stage is None:
+                    y = self.cur_year()
+                    exam = dict(y["exam"])
+                    exam["questions"] = exam_builder.build_year_exam(y)
+                    self.start_exam(exam, self.exam["accent"], 3)
+                else:
+                    self._launch_final(self.final_stage)
             elif tag == "answer":
                 self.go("INPUT", "")
             elif tag == "send":
@@ -1425,6 +1451,9 @@ class Game:
             return
 
         if self.state == "STORY":
+            if getattr(self, "_skip_rect", None) and self._skip_rect.collidepoint(pos):
+                self._skip_story()
+                return
             sc = self._cur_scene()
             if sc and "choice" not in sc:
                 self._story_advance()
@@ -1432,7 +1461,9 @@ class Game:
     def _year_story_done(self):
         y = self.cur_year()
         if y["exam"]:
-            self.start_exam(y["exam"], y["accent"], 3)
+            exam = dict(y["exam"])
+            exam["questions"] = exam_builder.build_year_exam(y)
+            self.start_exam(exam, y["accent"], 3)
         else:
             self._launch_final(0)
 
@@ -1456,6 +1487,10 @@ class Game:
                             (W, H), pygame.FULLSCREEN | pygame.SCALED if self.full else 0)
                     elif e.key == pygame.K_m:
                         self.music.toggle_mute()
+                    elif e.key == pygame.K_s and self.state == "STORY":
+                        sc = self._cur_scene()
+                        if not (sc and "choice" in sc):
+                            self._skip_story()
                     elif self.state == "INPUT":
                         if e.key == pygame.K_BACKSPACE:
                             self.time_input = self.time_input[:-1]
@@ -1480,11 +1515,10 @@ class Game:
             self.bg.update(dt)
             self.fx.update(dt)
             self.tr.update(dt)
+            self.toasts.update(dt)
             self.shake = max(0, self.shake - dt)
             for b in self.buttons:
                 b.update(dt, mouse)
-            if self.state == "STORY" and self.skippable:
-                self._get_skip_btn().update(dt, mouse)
 
             if self.state == "STORY":
                 sc = self._cur_scene()
@@ -1518,19 +1552,15 @@ class Game:
                 self.draw_input(s)
             elif self.state == "THANKS":
                 self.draw_thanks(s)
+            elif self.state == "ACH":
+                self.draw_ach(s)
 
-            # Показатели видны постоянно во всех игровых сценах.
-            # На карте (MAP) уже есть большой HUD, поэтому компактный там не нужен.
-            if self.state in ("STORY", "RESULT"):
-                self._hud_compact(s, "tl")
-            elif self.state == "EXAM":
-                self._hud_compact(s, "tr")
-
-            if self.state in ("MENU", "MAP", "LETTER", "INPUT", "THANKS", "RESULT"):
+            if self.state in ("MENU", "MAP", "LETTER", "INPUT", "THANKS", "RESULT", "ACH"):
                 for b in self.buttons:
                     b.draw(s)
 
             self.fx.draw(s)
+            self.toasts.draw(s)
             self.tr.draw(s)
             pygame.display.flip()
 

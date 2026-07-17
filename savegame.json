@@ -1,0 +1,15 @@
+{
+ "unlocked": 1,
+ "energy": 100,
+ "confidence": 76,
+ "results": {
+  "0": 0.6666666666666666
+ },
+ "earned": [
+  "survivor",
+  "night_watch",
+  "first_exam"
+ ],
+ "night_studier": true,
+ "flawless_streak": 0
+}
