@@ -37,16 +37,13 @@ FONT_DIR = os.path.join(BASE_DIR, "assets", "fonts")
 MUSIC_DIR = os.path.join(BASE_DIR, "assets", "music")
 BOOKING_FILE = os.path.join(BASE_DIR, "booking.txt")
 
-# Музыка по состояниям. Клади файлы в assets/music/ с этими именами.
-# Форматы: .mp3, .ogg, .wav. Если файла нет — просто тишина, ошибок не будет.
-MUSIC_TRACKS = {
-    "menu":  ["menu.mp3", "menu.ogg", "menu.wav"],
-    "story": ["story.mp3", "story.ogg", "story.wav"],
-    "exam":  ["exam.mp3", "exam.ogg", "exam.wav"],
-    "final": ["final.mp3", "final.ogg", "final.wav"],
-}
-# Если положить один файл music.mp3 (или .ogg/.wav) — он будет играть на всех экранах.
-MUSIC_VOLUME = 0.45   # 0.0 — тихо, 1.0 — максимум
+# Музыка. Клади файлы в assets/music/
+#   Один трек на состояние:      story.mp3, exam.mp3, menu.mp3, final.mp3
+#   Несколько (переключаются):   папки assets/music/story/, /exam/, /menu/, /final/
+#                                либо story1.mp3, story2.mp3, story_ночь.mp3 ...
+#   Один трек на всю игру:       music.mp3
+# Форматы: .mp3 .ogg .wav .flac .opus. Нет файла — просто тишина, без ошибок.
+MUSIC_VOLUME = 0.45
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -624,54 +621,131 @@ class Toasts:
 
 
 # ══════════════════════════════ МУЗЫКА ══════════════════════════════
-class Music:
-    """Плавная смена фоновых треков по состояниям. Отсутствие файла — не ошибка."""
+AUDIO_EXT = (".mp3", ".ogg", ".wav", ".flac", ".opus")
+MUSIC_END_EVENT = pygame.USEREVENT + 7
 
+
+class Music:
     def __init__(self):
         self.enabled = True
-        self.current = None
         self.muted = False
         self.vol = MUSIC_VOLUME
+        self.key = None
+        self.playlist = []
+        self.idx = 0
+        self.notice = ""
+        self.notice_t = 0.0
         try:
             pygame.mixer.init()
+            pygame.mixer.music.set_endevent(MUSIC_END_EVENT)
         except pygame.error as e:
             print(f"[музыка] mixer недоступен: {e}")
             self.enabled = False
 
-    def _find(self, key):
-        # сначала специальный трек для состояния, потом общий music.* на всю игру
-        names = list(MUSIC_TRACKS.get(key, [])) + [
-            "music.mp3", "music.ogg", "music.wav",
-        ]
-        for name in names:
-            p = os.path.join(MUSIC_DIR, name)
-            if os.path.isfile(p):
-                return p
-        return None
+    def _scan(self, key):
+        found = []
+        sub = os.path.join(MUSIC_DIR, key)
+        if os.path.isdir(sub):
+            for f in sorted(os.listdir(sub)):
+                if f.lower().endswith(AUDIO_EXT):
+                    found.append(os.path.join(sub, f))
+        if os.path.isdir(MUSIC_DIR):
+            for f in sorted(os.listdir(MUSIC_DIR)):
+                low = f.lower()
+                if not low.endswith(AUDIO_EXT):
+                    continue
+                stem = os.path.splitext(low)[0]
+                if stem == key or stem.startswith(key + "_") or (
+                        stem.startswith(key) and stem[len(key):].isdigit()):
+                    p = os.path.join(MUSIC_DIR, f)
+                    if p not in found:
+                        found.append(p)
+        if not found and os.path.isdir(MUSIC_DIR):
+            for f in sorted(os.listdir(MUSIC_DIR)):
+                low = f.lower()
+                if low.endswith(AUDIO_EXT) and os.path.splitext(low)[0].startswith("music"):
+                    found.append(os.path.join(MUSIC_DIR, f))
+        return found
 
-    def play(self, key):
-        if not self.enabled:
-            return
-        path = self._find(key)
-        # если для нового состояния тот же файл — не перезапускаем
-        if self.current == path and pygame.mixer.music.get_busy():
-            return
-        self.current = path
-        if not path:
+    def _start(self, fade=800):
+        if not self.enabled or not self.playlist:
             pygame.mixer.music.stop()
             return
+        self.idx %= len(self.playlist)
+        path = self.playlist[self.idx]
         try:
             pygame.mixer.music.load(path)
             pygame.mixer.music.set_volume(0 if self.muted else self.vol)
-            pygame.mixer.music.play(-1, fade_ms=800)
+            pygame.mixer.music.play(0, fade_ms=fade)
         except pygame.error as e:
             print(f"[музыка] не удалось запустить {path}: {e}")
+
+    def play(self, key):
+        if not self.enabled or key == self.key:
+            return
+        self.key = key
+        self.playlist = self._scan(key)
+        self.idx = 0
+        self._start()
+
+    def next_track(self, announce=True):
+        if not self.enabled or len(self.playlist) < 1:
+            return
+        self.idx = (self.idx + 1) % len(self.playlist)
+        self._start(fade=300)
+        if announce and self.playlist:
+            self.notice = self.track_name()
+            self.notice_t = 2.6
+
+    def track_ended(self):
+        self.next_track(announce=False)
+
+    def track_name(self):
+        if not self.playlist:
+            return ""
+        return os.path.splitext(os.path.basename(self.playlist[self.idx]))[0]
+
+    def change_volume(self, delta):
+        if not self.enabled:
+            return
+        self.vol = clamp(self.vol + delta, 0.0, 1.0)
+        self.muted = False
+        pygame.mixer.music.set_volume(self.vol)
+        self.notice = f"Громкость {int(self.vol * 100)}%"
+        self.notice_t = 1.6
 
     def toggle_mute(self):
         if not self.enabled:
             return
         self.muted = not self.muted
         pygame.mixer.music.set_volume(0 if self.muted else self.vol)
+        self.notice = "Музыка выключена" if self.muted else "Музыка включена"
+        self.notice_t = 1.6
+
+    def update(self, dt):
+        if self.notice_t > 0:
+            self.notice_t = max(0.0, self.notice_t - dt)
+
+    def draw(self, surf):
+        if self.notice_t <= 0 or not self.notice:
+            return
+        a = clamp(self.notice_t / 0.5, 0, 1)
+        f = F(15, True)
+        label = self.notice
+        if self.playlist and len(self.playlist) > 1 and not self.notice.startswith("Гром"):
+            label = f"{self.notice}  ({self.idx + 1}/{len(self.playlist)})"
+        w = f.size(label)[0] + 54
+        rect = pygame.Rect(24, H - 62, w, 36)
+        panel(surf, rect, (18, 20, 32), radius=12, alpha=int(225 * a),
+              border=mix((70, 74, 96), GOLD, 0.5), bw=2)
+        cx = rect.x + 20
+        cy = rect.centery
+        col = mix(DIM, GOLD, 0.7)
+        pygame.draw.circle(surf, col, (cx - 2, cy + 5), 4)
+        pygame.draw.line(surf, col, (cx + 2, cy + 5), (cx + 2, cy - 7), 2)
+        pygame.draw.line(surf, col, (cx + 2, cy - 7), (cx + 9, cy - 9), 2)
+        draw_text(surf, label, f, mix(CREAM, WHITE, 0.3), rect.x + 38,
+                  rect.centery - f.get_height() // 2, alpha=int(255 * a))
 
 
 # ══════════════════════════════ ИГРА ══════════════════════════════
@@ -847,7 +921,7 @@ class Game:
             got = len(self.earned)
             draw_text(s, f"собрано достижений: {got} / {len(ACHIEVEMENTS)}",
                       F(14), (150, 155, 175), W // 2, H - 62, center=True)
-        draw_text(s, "мышь · F11 — экран · M — музыка · S — пропуск диалога · Esc — выход",
+        draw_text(s, "F11 — экран · M — звук · N — сменить трек · −/+ громкость · S — пропуск · Esc — выход",
                   F(14), (110, 115, 135), W // 2, H - 38, center=True)
 
     # ─────────────────────── ДОСТИЖЕНИЯ ───────────────────────
@@ -1487,6 +1561,12 @@ class Game:
                             (W, H), pygame.FULLSCREEN | pygame.SCALED if self.full else 0)
                     elif e.key == pygame.K_m:
                         self.music.toggle_mute()
+                    elif e.key == pygame.K_n:
+                        self.music.next_track()
+                    elif e.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                        self.music.change_volume(-0.1)
+                    elif e.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                        self.music.change_volume(+0.1)
                     elif e.key == pygame.K_s and self.state == "STORY":
                         sc = self._cur_scene()
                         if not (sc and "choice" in sc):
@@ -1509,6 +1589,8 @@ class Game:
                             sc = self._cur_scene()
                             if sc and "choice" not in sc:
                                 self._story_advance()
+                elif e.type == MUSIC_END_EVENT:
+                    self.music.track_ended()
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
                     self._click(mouse)
 
@@ -1516,6 +1598,7 @@ class Game:
             self.fx.update(dt)
             self.tr.update(dt)
             self.toasts.update(dt)
+            self.music.update(dt)
             self.shake = max(0, self.shake - dt)
             for b in self.buttons:
                 b.update(dt, mouse)
@@ -1560,6 +1643,7 @@ class Game:
                     b.draw(s)
 
             self.fx.draw(s)
+            self.music.draw(s)
             self.toasts.draw(s)
             self.tr.draw(s)
             pygame.display.flip()
