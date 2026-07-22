@@ -773,6 +773,7 @@ class Game:
         self.energy = 100
         self.confidence = 50
         self.results = {}
+        self.gradebook = []
         self.earned = set()
         self.flawless_streak = 0
         self.night_studier = False
@@ -795,6 +796,7 @@ class Game:
         self.final_stage = 0
         self.shake = 0.0
         self._skip_rect = None
+        self._grades_from = "MENU"
 
         self.letter_t = 0.0
         self.time_input = ""
@@ -810,6 +812,7 @@ class Game:
         self.energy = 100
         self.confidence = 50
         self.results = {}
+        self.gradebook = []
         self.earned = set()
         self.flawless_streak = 0
         self.night_studier = False
@@ -832,6 +835,7 @@ class Game:
             "energy": self.energy,
             "confidence": self.confidence,
             "results": {str(k): v for k, v in self.results.items()},
+            "gradebook": self.gradebook,
             "earned": list(self.earned),
             "night_studier": self.night_studier,
             "flawless_streak": self.flawless_streak,
@@ -845,6 +849,7 @@ class Game:
         self.energy = data.get("energy", 100)
         self.confidence = data.get("confidence", 50)
         self.results = {int(k): v for k, v in data.get("results", {}).items()}
+        self.gradebook = data.get("gradebook", [])
         self.earned = set(data.get("earned", []))
         self.night_studier = data.get("night_studier", False)
         self.flawless_streak = data.get("flawless_streak", 0)
@@ -860,7 +865,7 @@ class Game:
 
     def _enter(self, state):
         track = {"MENU": "menu", "MAP": "story", "STORY": "story",
-                 "EXAM": "exam", "RESULT": "exam", "ACH": "menu",
+                 "EXAM": "exam", "RESULT": "exam", "ACH": "menu", "GRADES": "menu",
                  "LETTER": "final", "INPUT": "final", "THANKS": "final"}.get(state)
         if track:
             self.music.play(track)
@@ -868,6 +873,8 @@ class Game:
             self._menu()
         elif state == "ACH":
             self._ach_screen()
+        elif state == "GRADES":
+            self._grades_screen()
         elif state == "MAP":
             self._map()
         elif state == "STORY":
@@ -890,18 +897,19 @@ class Game:
         self.bg.set_theme((60, 45, 95), (255, 150, 180))
         has = savemod.has_save()
         self.buttons = []
-        y0 = 452
+        y0 = 436
         if has:
-            self.buttons.append(Button((W // 2 - 150, y0, 300, 54), "Продолжить", GOLD, 23, tag="continue"))
-            y0 += 64
-            self.buttons.append(Button((W // 2 - 150, y0, 300, 50), "Начать заново", (200, 160, 190), 20, tag="restart"))
+            self.buttons.append(Button((W // 2 - 150, y0, 300, 52), "Продолжить", GOLD, 23, tag="continue"))
             y0 += 60
+            self.buttons.append(Button((W // 2 - 150, y0, 300, 46), "Начать заново", (200, 160, 190), 19, tag="restart"))
+            y0 += 54
         else:
-            self.buttons.append(Button((W // 2 - 150, y0, 300, 58), "Начать путь", GOLD, 24, tag="start"))
-            y0 += 68
-        self.buttons.append(Button((W // 2 - 150, y0, 300, 46), "Достижения", (150, 180, 220), 19, tag="ach"))
-        y0 += 56
-        self.buttons.append(Button((W // 2 - 150, y0, 300, 44), "Выход", (150, 150, 170), 19, tag="quit"))
+            self.buttons.append(Button((W // 2 - 150, y0, 300, 56), "Начать путь", GOLD, 24, tag="start"))
+            y0 += 64
+        self.buttons.append(Button((W // 2 - 154, y0, 148, 44), "Зачётка", (220, 200, 160), 18, tag="grades"))
+        self.buttons.append(Button((W // 2 + 6, y0, 148, 44), "Достижения", (150, 180, 220), 18, tag="ach"))
+        y0 += 52
+        self.buttons.append(Button((W // 2 - 150, y0, 300, 42), "Выход", (150, 150, 170), 18, tag="quit"))
 
     def draw_menu(self, s):
         t = self.time
@@ -954,6 +962,134 @@ class Game:
             draw_text(s, info["title"], F(20, True), tcol, rect.x + 86, rect.y + 24)
             draw_text(s, info["desc"] if unlocked else "— ещё не открыто —",
                       F(15), DIM if unlocked else (80, 84, 104), rect.x + 86, rect.y + 52)
+
+    # ─────────────────────── ЗАЧЁТКА ───────────────────────
+    def _expected_exams(self):
+        out = []
+        for y in YEARS:
+            if y.get("exam"):
+                nm = y["exam"]["name"]
+                for pref in ("Экзамен: ", "Экзамен ", "экзамен: "):
+                    if nm.startswith(pref):
+                        nm = nm[len(pref):]
+                        break
+                out.append((y["num"], nm))
+        for e in FINAL_EXAMS:
+            out.append((6, e["name"]))
+        return out
+
+    def _grade_words(self, score):
+        if score >= 0.9:
+            return "отлично", 5, (40, 110, 70)
+        if score >= 0.7:
+            return "хорошо", 4, (55, 85, 140)
+        if score >= 0.5:
+            return "удовлетв.", 3, (140, 100, 40)
+        return "неудовл.", 2, (150, 50, 50)
+
+    def _grades_screen(self):
+        self.bg.set_theme((32, 34, 52), (220, 200, 160))
+        self.buttons = [Button((W // 2 - 110, H - 52, 220, 42), "Назад",
+                               (170, 170, 190), 19, tag="grades_back")]
+
+    def _signature(self, s, x, y, seed, color):
+        pts = []
+        n = 16
+        for i in range(n):
+            t = i / (n - 1)
+            px = x + t * 52
+            py = y + math.sin(t * 7.0 + seed * 1.7) * 5 * (1 - abs(t - 0.5)) \
+                 + math.sin(t * 3.1 + seed) * 3
+            pts.append((px, py))
+        if len(pts) > 1:
+            pygame.draw.lines(s, color, False, pts, 2)
+        pygame.draw.line(s, color, (x + 4, y + 7), (x + 44, y + 6), 1)
+
+    def draw_grades(self, s):
+        PAPER = (243, 238, 226)
+        INK = (38, 42, 58)
+        GREY = (120, 118, 112)
+        LINE = (198, 190, 174)
+        PEN = (44, 62, 120)
+
+        card = pygame.Rect(120, 40, W - 240, H - 110)
+        shadow = card.copy()
+        shadow.move_ip(6, 8)
+        panel(s, shadow, (0, 0, 0), radius=10, alpha=90)
+        panel(s, card, PAPER, radius=10, alpha=255, border=(205, 196, 178), bw=2)
+        pygame.draw.line(s, (222, 214, 198), (card.x + 26, card.y + 10),
+                         (card.x + 26, card.bottom - 10), 2)
+
+        draw_text(s, "ЗАЧЁТНАЯ КНИЖКА", F(30, True), INK, card.centerx, card.y + 34, center=True)
+        draw_text(s, UNIVERSITY, F(15), GREY, card.centerx, card.y + 62, center=True)
+        pygame.draw.line(s, LINE, (card.x + 60, card.y + 82), (card.right - 60, card.y + 82), 1)
+        draw_text(s, f"Студент:  {HERO}", F(17, True), INK, card.x + 62, card.y + 94)
+
+        done = {e["name"]: e for e in self.gradebook}
+        expected = self._expected_exams()
+
+        x = card.x + 62
+        colw = [34, 400, 150, 105, 90]
+        head_y = card.y + 128
+        heads = ["№", "Наименование дисциплины", "Оценка", "Дата", "Подпись"]
+        cx = x
+        for i, h in enumerate(heads):
+            draw_text(s, h, F(13, True), GREY, cx, head_y)
+            cx += colw[i]
+        pygame.draw.line(s, LINE, (x, head_y + 20), (card.right - 62, head_y + 20), 1)
+
+        row_h = 40
+        y0 = head_y + 30
+        total_pts, cnt = 0, 0
+        for idx, (course, name) in enumerate(expected):
+            ry = y0 + idx * row_h
+            rec = done.get(name)
+            cx = x
+            draw_text(s, str(idx + 1), F(15), GREY if rec else (185, 180, 168), cx, ry + 10)
+            cx += colw[0]
+            nm = name if len(name) < 42 else name[:39] + "…"
+            draw_text(s, nm, F(16, True) if rec else F(16),
+                      INK if rec else (176, 170, 158), cx, ry + 8)
+            draw_text(s, f"{course} курс", F(11), (168, 162, 150), cx, ry + 26)
+            cx += colw[1]
+            if rec:
+                word, num, gcol = self._grade_words(rec["score"])
+                draw_text(s, word, F(16, True), gcol, cx, ry + 8)
+                draw_text(s, f"{int(rec['score'] * 100)}%", F(11), (168, 162, 150), cx, ry + 26)
+                total_pts += num
+                cnt += 1
+                cx += colw[2]
+                draw_text(s, rec["date"], F(14), INK, cx, ry + 10)
+                cx += colw[3]
+                self._signature(s, cx + 6, ry + 20, idx, PEN)
+            else:
+                draw_text(s, "—", F(16), (196, 190, 176), cx, ry + 8)
+            pygame.draw.line(s, (226, 219, 204), (x, ry + row_h - 4),
+                             (card.right - 62, ry + row_h - 4), 1)
+
+        foot_y = y0 + len(expected) * row_h + 10
+        if cnt:
+            avg = total_pts / cnt
+            draw_text(s, f"Сдано экзаменов: {cnt} из {len(expected)}", F(15), GREY, x, foot_y)
+            draw_text(s, f"Средний балл: {avg:.2f}", F(20, True), INK,
+                      card.right - 240, foot_y - 4)
+            if cnt == len(expected):
+                self._stamp(s, card.right - 130, foot_y + 4)
+        else:
+            draw_text(s, "Пока ни одного экзамена. Всё впереди.", F(15), GREY, x, foot_y)
+
+    def _stamp(self, s, cx, cy):
+        col = (158, 46, 54)
+        st = pygame.Surface((150, 150), pygame.SRCALPHA)
+        pygame.draw.circle(st, (*col, 190), (75, 75), 52, 3)
+        pygame.draw.circle(st, (*col, 190), (75, 75), 44, 1)
+        f = F(13, True)
+        for i, ln in enumerate(["ДОПУЩЕНА", "К РАБОТЕ", "ВРАЧОМ"]):
+            img = f.render(ln, True, col)
+            img.set_alpha(200)
+            st.blit(img, img.get_rect(center=(75, 58 + i * 17)))
+        st = pygame.transform.rotate(st, -13)
+        s.blit(st, st.get_rect(center=(cx, cy)))
 
     # ─────────────────────── КАРТА ───────────────────────
     def _map(self):
@@ -1323,10 +1459,33 @@ class Game:
         msg = ("Ты справилась." if passed else "Ничего. Пересдача — это тоже часть пути.")
         draw_text(s, msg, F(18), mix(CREAM, col, 0.3), W // 2, 522, center=True)
 
+    def _record_grade(self, score):
+        name = self.exam.get("name", "")
+        for pref in ("Экзамен: ", "Экзамен ", "экзамен: "):
+            if name.startswith(pref):
+                name = name[len(pref):]
+                break
+        if self.final_stage is None:
+            course = self.cur_year()["num"]
+        else:
+            course = 6
+        entry = {
+            "name": name,
+            "score": round(score, 3),
+            "course": course,
+            "date": datetime.datetime.now().strftime("%d.%m.%Y"),
+        }
+        for i, e in enumerate(self.gradebook):
+            if e.get("name") == name:
+                self.gradebook[i] = entry
+                return
+        self.gradebook.append(entry)
+
     def _after_result(self):
         total = len(self.exam["questions"])
         score = self.correct / total
         flawless = (self.correct == total)
+        self._record_grade(score)
 
         self.grant("first_exam")
         if flawless:
@@ -1465,8 +1624,12 @@ class Game:
         draw_text(s, "(время сохранено в booking.txt)", F(14), (100, 105, 125),
                   W // 2, 600, center=True)
         if not self.buttons:
-            self.buttons = [Button((W // 2 - 110, 630, 220, 46), "В меню",
-                                   (150, 150, 180), 19, tag="menu")]
+            self.buttons = [
+                Button((W // 2 - 226, 630, 216, 46), "Моя зачётка",
+                       (220, 200, 160), 19, tag="grades"),
+                Button((W // 2 + 10, 630, 216, 46), "В меню",
+                       (150, 150, 180), 19, tag="menu"),
+            ]
 
     # ─────────────────────── КЛИКИ ───────────────────────
     def _click(self, pos):
@@ -1485,6 +1648,11 @@ class Game:
                 self.reset()
             elif tag == "ach":
                 self.go("ACH", "")
+            elif tag == "grades":
+                self._grades_from = self.state
+                self.go("GRADES", "")
+            elif tag == "grades_back":
+                self.go(getattr(self, "_grades_from", "MENU") or "MENU", "")
             elif tag == "menu_back":
                 self.go("MENU", "")
             elif tag == "quit":
@@ -1637,8 +1805,11 @@ class Game:
                 self.draw_thanks(s)
             elif self.state == "ACH":
                 self.draw_ach(s)
+            elif self.state == "GRADES":
+                self.draw_grades(s)
 
-            if self.state in ("MENU", "MAP", "LETTER", "INPUT", "THANKS", "RESULT", "ACH"):
+            if self.state in ("MENU", "MAP", "LETTER", "INPUT", "THANKS",
+                              "RESULT", "ACH", "GRADES"):
                 for b in self.buttons:
                     b.draw(s)
 
