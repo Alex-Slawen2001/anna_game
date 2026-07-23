@@ -1,15 +1,25 @@
 {
- "unlocked": 1,
- "energy": 100,
- "confidence": 76,
+ "unlocked": 2,
+ "energy": 95,
+ "confidence": 100,
  "results": {
-  "0": 0.6666666666666666
+  "0": 0.6666666666666666,
+  "1": 1.0
  },
+ "gradebook": [
+  {
+   "name": "Нормальная физиология и биохимия",
+   "score": 1.0,
+   "course": 2,
+   "date": "23.07.2026"
+  }
+ ],
  "earned": [
-  "survivor",
+  "first_exam",
   "night_watch",
-  "first_exam"
+  "flawless",
+  "survivor"
  ],
  "night_studier": true,
- "flawless_streak": 0
+ "flawless_streak": 1
 }

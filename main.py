@@ -25,6 +25,9 @@ from content import (
 import exam_builder
 import live_questions
 import save as savemod
+import diploma as diplomamod
+from sfx import Sfx
+from gallery import Gallery, has_photos as gallery_has_photos
 from achievements import ACHIEVEMENTS, ACH_ORDER
 
 # ══════════════════════════════ КОНСТАНТЫ ══════════════════════════════
@@ -44,6 +47,7 @@ BOOKING_FILE = os.path.join(BASE_DIR, "booking.txt")
 #   Один трек на всю игру:       music.mp3
 # Форматы: .mp3 .ogg .wav .flac .opus. Нет файла — просто тишина, без ошибок.
 MUSIC_VOLUME = 0.45
+SFX_VOLUME = 0.55
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -53,6 +57,13 @@ GOLD = (255, 210, 120)
 RED = (235, 90, 100)
 GREEN = (110, 220, 150)
 DIM = (150, 155, 170)
+
+
+HELPERS = (
+    ("nastya", N, "50/50", "Настя уберёт два неверных варианта"),
+    ("katya", K, "конспект", "Катя подскажет один неверный вариант"),
+    ("vika", V, "звонок", "Вика вернёт сердце и придаст уверенности"),
+)
 
 
 # ══════════════════════════════ ШРИФТЫ ══════════════════════════════
@@ -585,6 +596,10 @@ class Toasts:
     def push(self, key):
         self.queue.append({"key": key, "t": 0.0, "life": 4.2})
 
+    def push_text(self, text, color=None):
+        self.queue.append({"key": None, "text": text, "color": color,
+                           "t": 0.0, "life": 3.2})
+
     def update(self, dt):
         if self.queue and len(self.active) < 2:
             self.active.append(self.queue.pop(0))
@@ -592,8 +607,37 @@ class Toasts:
             a["t"] += dt
         self.active = [a for a in self.active if a["t"] < a["life"]]
 
+    def _draw_text_toast(self, surf, a, i):
+        k = a["t"] / a["life"]
+        if k < 0.14:
+            slide = ease_out(k / 0.14)
+        elif k > 0.82:
+            slide = ease_out((1 - k) / 0.18)
+        else:
+            slide = 1.0
+        slide = clamp(slide, 0, 1)
+        col = a.get("color") or GOLD
+        f = F(16, True)
+        text = a.get("text", "")
+        w = min(430, f.size(text)[0] + 34)
+        h = 48
+        x = W - 20 - w + int((1 - slide) * (w + 40))
+        y = 90 + i * 60
+        rect = pygame.Rect(x, y, w, h)
+        panel(surf, rect, (20, 22, 36), radius=13, alpha=int(238 * slide),
+              border=col, bw=2)
+        lines = wrap_text(text, f, w - 26)
+        ty = rect.centery - (len(lines) * (f.get_height() + 1)) // 2
+        for ln in lines[:2]:
+            draw_text(surf, ln, f, mix(CREAM, col, 0.25), rect.x + 13, ty,
+                      alpha=int(255 * slide))
+            ty += f.get_height() + 1
+
     def draw(self, surf):
         for i, a in enumerate(self.active):
+            if a["key"] is None:
+                self._draw_text_toast(surf, a, i)
+                continue
             info = ACHIEVEMENTS.get(a["key"], {})
             k = a["t"] / a["life"]
             if k < 0.12:
@@ -763,6 +807,8 @@ class Game:
         self.por = Portraits()
         self.music = Music()
         self.toasts = Toasts()
+        self.sfx = Sfx(SFX_VOLUME)
+        self.gallery = Gallery()
 
         self.state = "MENU"
         self.buttons = []
@@ -797,6 +843,11 @@ class Game:
         self.shake = 0.0
         self._skip_rect = None
         self._grades_from = "MENU"
+        self.helps = {}
+        self._help_rects = {}
+        self._help_tip = ""
+        self.diploma_path = None
+        self._beat_t = 0.0
 
         self.letter_t = 0.0
         self.time_input = ""
@@ -826,6 +877,7 @@ class Game:
         if key in self.earned:
             return
         self.earned.add(key)
+        self.sfx.play("achieve")
         self.toasts.push(key)
         self.fx.burst(W - 60, 120, GOLD, 20)
 
@@ -865,7 +917,7 @@ class Game:
 
     def _enter(self, state):
         track = {"MENU": "menu", "MAP": "story", "STORY": "story",
-                 "EXAM": "exam", "RESULT": "exam", "ACH": "menu", "GRADES": "menu",
+                 "EXAM": "exam", "RESULT": "exam", "ACH": "menu", "GRADES": "menu", "GALLERY": "final",
                  "LETTER": "final", "INPUT": "final", "THANKS": "final"}.get(state)
         if track:
             self.music.play(track)
@@ -875,6 +927,8 @@ class Game:
             self._ach_screen()
         elif state == "GRADES":
             self._grades_screen()
+        elif state == "GALLERY":
+            self._gallery_screen()
         elif state == "MAP":
             self._map()
         elif state == "STORY":
@@ -962,6 +1016,66 @@ class Game:
             draw_text(s, info["title"], F(20, True), tcol, rect.x + 86, rect.y + 24)
             draw_text(s, info["desc"] if unlocked else "— ещё не открыто —",
                       F(15), DIM if unlocked else (80, 84, 104), rect.x + 86, rect.y + 52)
+
+    def _save_diploma(self):
+        path = diplomamod.save(HERO, self.gradebook, UNIVERSITY)
+        self.sfx.play("stamp")
+        if path:
+            self.diploma_path = path
+            self.toasts.push_text(f"Диплом сохранён: {os.path.basename(path)}", GOLD)
+            self.fx.confetti(30)
+        else:
+            self.toasts.push_text("Не удалось сохранить диплом", RED)
+
+    # ─────────────────────── ГАЛЕРЕЯ ───────────────────────
+    def _gallery_screen(self):
+        self.bg.set_theme((48, 30, 62), (255, 150, 180))
+        self.gallery.reload()
+        self.buttons = [
+            Button((W // 2 - 236, H - 62, 150, 44), "← Назад", (150, 150, 180), 18, tag="gal_prev"),
+            Button((W // 2 - 76, H - 62, 152, 44), "Закрыть", (200, 170, 190), 18, tag="gal_close"),
+            Button((W // 2 + 86, H - 62, 150, 44), "Вперёд →", (150, 150, 180), 18, tag="gal_next"),
+        ]
+
+    def draw_gallery(self, s):
+        n = self.gallery.count()
+        if n == 0:
+            draw_text(s, "Здесь будут ваши фотографии", F(30, True), CREAM,
+                      W // 2, 300, center=True)
+            draw_text(s, "положи снимки в папку  assets/gallery/", F(19), DIM,
+                      W // 2, 350, center=True)
+            return
+
+        img = self.gallery.image()
+        cx, cy = W // 2, 320
+        if img:
+            iw, ih = img.get_size()
+            frame = pygame.Rect(0, 0, iw + 24, ih + 24)
+            frame.center = (cx, cy)
+            sh = frame.copy(); sh.move_ip(5, 7)
+            panel(s, sh, (0, 0, 0), radius=8, alpha=110)
+            panel(s, frame, (247, 243, 233), radius=8, alpha=255,
+                  border=(212, 198, 176), bw=2)
+            im = img
+            if self.gallery.fade < 1.0:
+                im = img.copy()
+                im.set_alpha(int(255 * ease_out(self.gallery.fade)))
+            s.blit(im, im.get_rect(center=(cx, cy)))
+
+        cap = self.gallery.caption()
+        if cap:
+            f = F(26, True)
+            w = f.size(cap)[0] + 44
+            r = pygame.Rect(0, 0, w, 46)
+            r.center = (cx, 580)
+            panel(s, r, (18, 16, 28), radius=13, alpha=225,
+                  border=(255, 150, 180), bw=2)
+            draw_text(s, cap, f, CREAM, cx, r.centery, center=True)
+
+        draw_text(s, f"{self.gallery.idx + 1} / {n}", F(16), DIM, cx, 624, center=True)
+        for i in range(min(n, 14)):
+            col = (255, 150, 180) if i == self.gallery.idx else (90, 84, 104)
+            pygame.draw.circle(s, col, (cx - min(n, 14) * 9 + i * 18, 648), 4)
 
     # ─────────────────────── ЗАЧЁТКА ───────────────────────
     def _expected_exams(self):
@@ -1176,6 +1290,7 @@ class Game:
         self.si += 1
         self.typed = 0.0
         self.buttons = []
+        self.sfx.play("page", 0.5)
         if self.si >= len(self.scenes):
             if self.after_story:
                 self.after_story()
@@ -1312,11 +1427,87 @@ class Game:
         self.exam["timer"] = timer
         self.qi = 0
         self.lives = lives
+        self.max_lives = lives
         self.correct = 0
         self.answered = None
         self.q_timer = timer or 0
         self.final_stage = final_stage
+        self.helps = {k: True for k, _, _, _ in HELPERS}
         self.go("EXAM", exam["name"], 0.6)
+
+    def _use_help(self, key):
+        if not self.helps.get(key):
+            return
+        q = self.exam["questions"][self.qi]
+        wrong_btns = [b for b in self.buttons
+                      if isinstance(b.tag, tuple) and b.tag[0] == "ans"
+                      and b.tag[1] != q["correct"] and b.state == "idle"]
+
+        if key == "vika":
+            self.helps[key] = False
+            self.lives = min(self.max_lives, self.lives + 1)
+            self.confidence = clamp(self.confidence + 12, 0, 100)
+            self.energy = clamp(self.energy + 6, 0, 100)
+            self.sfx.play("achieve", 0.7)
+            self.fx.burst(96, 552, CHARACTER_COLORS.get(V, GOLD), 22)
+            self.toasts.push_text(f"{V}: «Ты справишься. Я в тебя верю.»",
+                                  CHARACTER_COLORS.get(V, GOLD))
+            return
+
+        if self.answered is not None or not wrong_btns:
+            return
+        n = 2 if key == "nastya" else 1
+        random.shuffle(wrong_btns)
+        for b in wrong_btns[:n]:
+            b.state = "faded"
+            b.enabled = False
+        self.helps[key] = False
+        self.sfx.play("page")
+        who = N if key == "nastya" else K
+        self.fx.burst(96, 482 if key == "katya" else 412,
+                      CHARACTER_COLORS.get(who, GOLD), 18)
+        msg = (f"{N}: «Эти два точно мимо.»" if key == "nastya"
+               else f"{K}: «Вот этот вариант вычеркни.»")
+        self.toasts.push_text(msg, CHARACTER_COLORS.get(who, GOLD))
+
+    def _draw_helpers(self, s):
+        self._help_rects = {}
+        self._help_tip = ""
+        mouse = pygame.mouse.get_pos()
+        for i, (key, who, label, tip) in enumerate(HELPERS):
+            cy = 412 + i * 70
+            rect = pygame.Rect(58, cy - 26, 76, 62)
+            self._help_rects[key] = rect
+            avail = self.helps.get(key, False)
+            if key != "vika" and self.answered is not None:
+                avail = avail and False
+            col = CHARACTER_COLORS.get(who, GOLD)
+            hov = rect.collidepoint(mouse) and self.helps.get(key, False)
+            if hov:
+                self._help_tip = tip
+            img = self.por.get(who, 46)
+            if not avail:
+                img = img.copy()
+                dark = pygame.Surface(img.get_size(), pygame.SRCALPHA)
+                dark.fill((12, 12, 22, 165))
+                img.blit(dark, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+            if avail and hov:
+                glow_circle(s, (96, cy - 4), 26, col, strength=44, layers=3)
+            pygame.draw.circle(s, col if avail else (70, 74, 92), (96, cy - 4), 25, 2)
+            s.blit(img, (96 - 23, cy - 4 - 23))
+            draw_text(s, label, F(12, True),
+                      mix(CREAM, col, 0.4) if avail else (86, 90, 108),
+                      96, cy + 26, center=True)
+            if not self.helps.get(key, True):
+                pygame.draw.line(s, (150, 60, 70), (78, cy - 20), (114, cy + 12), 3)
+        if self._help_tip:
+            f = F(14)
+            w = f.size(self._help_tip)[0] + 26
+            tip_rect = pygame.Rect(146, 380, w, 30)
+            panel(s, tip_rect, (16, 18, 30), radius=9, alpha=235,
+                  border=(80, 84, 108), bw=1)
+            draw_text(s, self._help_tip, f, CREAM, tip_rect.x + 13,
+                      tip_rect.centery - f.get_height() // 2)
 
     def _exam_ui(self):
         self.buttons = []
@@ -1329,6 +1520,7 @@ class Game:
             self.buttons.append(Button(
                 (150 + col * 500, top + row * 84, 470, 68), ans, acc, 20, tag=("ans", i)))
         self.q_timer = self.exam["timer"] or 0
+        self._beat_t = 0.0
         self.answered = None
 
     def _answer(self, i):
@@ -1349,9 +1541,11 @@ class Game:
             b.enabled = False
         if ok:
             self.correct += 1
+            self.sfx.play("correct")
             self.fx.burst(W // 2, 300, GREEN, 34)
             self.confidence = clamp(self.confidence + 3, 0, 100)
         else:
+            self.sfx.play("wrong")
             self.lives -= 1
             self.shake = 0.45
             self.fx.burst(W // 2, 300, RED, 22)
@@ -1622,14 +1816,22 @@ class Game:
             draw_text(s, ln, F(22), CREAM if i != 2 else mix(CREAM, GOLD, 0.5),
                       card.centerx, card.y + 36 + i * 38, center=True)
         draw_text(s, "(время сохранено в booking.txt)", F(14), (100, 105, 125),
-                  W // 2, 600, center=True)
+                  W // 2, 586, center=True)
         if not self.buttons:
-            self.buttons = [
-                Button((W // 2 - 226, 630, 216, 46), "Моя зачётка",
-                       (220, 200, 160), 19, tag="grades"),
-                Button((W // 2 + 10, 630, 216, 46), "В меню",
-                       (150, 150, 180), 19, tag="menu"),
-            ]
+            row = []
+            if self.gallery.count() or gallery_has_photos():
+                row.append(("Наши фото", (255, 150, 180), "gallery"))
+            row.append(("Моя зачётка", (220, 200, 160), "grades"))
+            row.append(("Диплом", (170, 210, 235), "diploma"))
+            bw, gap = 196, 12
+            total = len(row) * bw + (len(row) - 1) * gap
+            x = W // 2 - total // 2
+            self.buttons = []
+            for label, col, tg in row:
+                self.buttons.append(Button((x, 612, bw, 44), label, col, 18, tag=tg))
+                x += bw + gap
+            self.buttons.append(Button((W // 2 - 110, 666, 220, 40), "В меню",
+                                       (150, 150, 180), 18, tag="menu"))
 
     # ─────────────────────── КЛИКИ ───────────────────────
     def _click(self, pos):
@@ -1638,6 +1840,7 @@ class Game:
         for b in self.buttons:
             if not b.hovered(pos):
                 continue
+            self.sfx.play("click")
             tag = b.tag
             if tag == "start":
                 self.go("MAP", "Сентябрь. Первый курс.")
@@ -1648,6 +1851,18 @@ class Game:
                 self.reset()
             elif tag == "ach":
                 self.go("ACH", "")
+            elif tag == "gallery":
+                self.go("GALLERY", "")
+            elif tag == "gal_prev":
+                self.gallery.step(-1)
+                self.sfx.play("page")
+            elif tag == "gal_next":
+                self.gallery.step(+1)
+                self.sfx.play("page")
+            elif tag == "gal_close":
+                self.go("THANKS", "")
+            elif tag == "diploma":
+                self._save_diploma()
             elif tag == "grades":
                 self._grades_from = self.state
                 self.go("GRADES", "")
@@ -1692,6 +1907,12 @@ class Game:
             self.letter_t = len(FINALE_LETTER) * 0.35 + 1
             return
 
+        if self.state == "EXAM":
+            for key, rect in (self._help_rects or {}).items():
+                if rect.collidepoint(pos) and self.helps.get(key):
+                    self._use_help(key)
+                    return
+
         if self.state == "STORY":
             if getattr(self, "_skip_rect", None) and self._skip_rect.collidepoint(pos):
                 self._skip_story()
@@ -1729,12 +1950,16 @@ class Game:
                             (W, H), pygame.FULLSCREEN | pygame.SCALED if self.full else 0)
                     elif e.key == pygame.K_m:
                         self.music.toggle_mute()
+                        self.sfx.set_muted(self.music.muted)
                     elif e.key == pygame.K_n:
                         self.music.next_track()
                     elif e.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                         self.music.change_volume(-0.1)
                     elif e.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
                         self.music.change_volume(+0.1)
+                    elif e.key in (pygame.K_LEFT, pygame.K_RIGHT) and self.state == "GALLERY":
+                        self.gallery.step(-1 if e.key == pygame.K_LEFT else 1)
+                        self.sfx.play("page")
                     elif e.key == pygame.K_s and self.state == "STORY":
                         sc = self._cur_scene()
                         if not (sc and "choice" in sc):
@@ -1767,6 +1992,7 @@ class Game:
             self.tr.update(dt)
             self.toasts.update(dt)
             self.music.update(dt)
+            self.gallery.update(dt)
             self.shake = max(0, self.shake - dt)
             for b in self.buttons:
                 b.update(dt, mouse)
@@ -1781,6 +2007,11 @@ class Game:
             if self.state == "EXAM" and self.exam.get("timer") and self.answered is None \
                     and not self.tr.active:
                 self.q_timer -= dt
+                if self.q_timer <= 6.0:
+                    self._beat_t -= dt
+                    if self._beat_t <= 0:
+                        self.sfx.play("heartbeat", 0.75)
+                        self._beat_t = 0.85 if self.q_timer > 3 else 0.55
                 if self.q_timer <= 0:
                     wrong = 0 if self.exam["questions"][self.qi]["correct"] != 0 else 1
                     self._answer(wrong)
@@ -1807,9 +2038,11 @@ class Game:
                 self.draw_ach(s)
             elif self.state == "GRADES":
                 self.draw_grades(s)
+            elif self.state == "GALLERY":
+                self.draw_gallery(s)
 
             if self.state in ("MENU", "MAP", "LETTER", "INPUT", "THANKS",
-                              "RESULT", "ACH", "GRADES"):
+                              "RESULT", "ACH", "GRADES", "GALLERY"):
                 for b in self.buttons:
                     b.draw(s)
 
