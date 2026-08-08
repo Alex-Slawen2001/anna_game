@@ -22,6 +22,10 @@ from content import (
     CHARACTER_COLORS, CHARACTER_PHOTOS,
     YEARS, FINAL_EXAMS, FINALE_SCENES, FINALE_LETTER,
 )
+from content import (
+    J, FREETIME_ACTIONS, FREETIME_INTRO, COURSE_SKILL,
+    YULYA_LINES, FREETIME_REPLIES, PREFINAL_SCENES,
+)
 import exam_builder
 import live_questions
 import save as savemod
@@ -823,6 +827,7 @@ class Game:
         self.earned = set()
         self.flawless_streak = 0
         self.night_studier = False
+        self.gym_count = 0
 
         live_questions.start_fetching()
 
@@ -848,6 +853,10 @@ class Game:
         self._help_tip = ""
         self.diploma_path = None
         self._beat_t = 0.0
+        self.ft_left = 0
+        self.ft_done = []
+        self.ft_skill_bonus = 0
+        self._ft_rects = {}
 
         self.letter_t = 0.0
         self.time_input = ""
@@ -867,6 +876,7 @@ class Game:
         self.earned = set()
         self.flawless_streak = 0
         self.night_studier = False
+        self.gym_count = 0
         self.saved_time = None
         self.time_input = ""
         self.fx.p.clear()
@@ -890,6 +900,7 @@ class Game:
             "gradebook": self.gradebook,
             "earned": list(self.earned),
             "night_studier": self.night_studier,
+            "gym_count": getattr(self, "gym_count", 0),
             "flawless_streak": self.flawless_streak,
         })
 
@@ -904,6 +915,7 @@ class Game:
         self.gradebook = data.get("gradebook", [])
         self.earned = set(data.get("earned", []))
         self.night_studier = data.get("night_studier", False)
+        self.gym_count = data.get("gym_count", 0)
         self.flawless_streak = data.get("flawless_streak", 0)
         return True
 
@@ -918,11 +930,14 @@ class Game:
     def _enter(self, state):
         track = {"MENU": "menu", "MAP": "story", "STORY": "story",
                  "EXAM": "exam", "RESULT": "exam", "ACH": "menu", "GRADES": "menu", "GALLERY": "final",
+                 "FREETIME": "story",
                  "LETTER": "final", "INPUT": "final", "THANKS": "final"}.get(state)
         if track:
             self.music.play(track)
         if state == "MENU":
             self._menu()
+        elif state == "FREETIME":
+            self._freetime_enter()
         elif state == "ACH":
             self._ach_screen()
         elif state == "GRADES":
@@ -1367,6 +1382,8 @@ class Game:
         self._mini_hud(s)
         cast = [HERO] + y["cast"]
         who = sc.get("who") if sc else None
+        if who and who not in cast:
+            cast = cast[:-1] + [who]
         n = len(cast)
         for i, name in enumerate(cast):
             cx = int(W / (n + 1) * (i + 1))
@@ -1433,7 +1450,26 @@ class Game:
         self.q_timer = timer or 0
         self.final_stage = final_stage
         self.helps = {k: True for k, _, _, _ in HELPERS}
+        self.cheats = self.ft_skill_bonus if final_stage is None else 0
+        self.ft_skill_bonus = 0
         self.go("EXAM", exam["name"], 0.6)
+
+    def _use_cheat(self):
+        if self.cheats <= 0 or self.answered is not None:
+            return
+        q = self.exam["questions"][self.qi]
+        wrong_btns = [b for b in self.buttons
+                      if isinstance(b.tag, tuple) and b.tag[0] == "ans"
+                      and b.tag[1] != q["correct"] and b.state == "idle"]
+        if not wrong_btns:
+            return
+        self.cheats -= 1
+        b = random.choice(wrong_btns)
+        b.state = "faded"
+        b.enabled = False
+        self.sfx.play("page")
+        self.fx.burst(W - 90, 300, (150, 200, 255), 16)
+        self.toasts.push_text("Шпаргалка: этот вариант точно не то.", (150, 200, 255))
 
     def _use_help(self, key):
         if not self.helps.get(key):
@@ -1469,6 +1505,32 @@ class Game:
         msg = (f"{N}: «Эти два точно мимо.»" if key == "nastya"
                else f"{K}: «Вот этот вариант вычеркни.»")
         self.toasts.push_text(msg, CHARACTER_COLORS.get(who, GOLD))
+
+    def _draw_cheat(self, s):
+        self._cheat_rect = None
+        if self.cheats <= 0 or self.answered is not None:
+            return
+        rect = pygame.Rect(W - 150, 390, 96, 96)
+        self._cheat_rect = rect
+        mouse = pygame.mouse.get_pos()
+        hov = rect.collidepoint(mouse)
+        col = (150, 200, 255)
+        if hov:
+            glow_circle(s, rect.center, 46, col, strength=40, layers=3)
+        panel(s, rect, mix((24, 28, 44), col, 0.16 if hov else 0.06),
+              radius=14, alpha=240, border=col, bw=2)
+        note = pygame.Rect(rect.centerx - 16, rect.centery - 24, 32, 30)
+        panel(s, note, (238, 240, 246), radius=4, alpha=255)
+        for li in range(3):
+            pygame.draw.line(s, (120, 130, 150),
+                             (note.x + 6, note.y + 8 + li * 7),
+                             (note.right - 6, note.y + 8 + li * 7), 2)
+        draw_text(s, "шпаргалка", F(13, True), mix(CREAM, col, 0.4),
+                  rect.centerx, rect.bottom - 18, center=True)
+        badge = pygame.Rect(rect.right - 22, rect.y - 8, 30, 26)
+        panel(s, badge, mix(col, BLACK, 0.4), radius=9, alpha=250, border=col, bw=1)
+        draw_text(s, f"{self.cheats}", F(15, True), WHITE,
+                  badge.centerx, badge.centery, center=True)
 
     def _draw_helpers(self, s):
         self._help_rects = {}
@@ -1599,6 +1661,8 @@ class Game:
             ty += font.get_height() + 6
         for b in self.buttons:
             b.draw(s)
+        self._draw_helpers(s)
+        self._draw_cheat(s)
         if self.answered is not None:
             ok = self.answered == q["correct"]
             box = pygame.Rect(150, 590, W - 300, 56)
@@ -1868,6 +1932,8 @@ class Game:
                 self.go("GRADES", "")
             elif tag == "grades_back":
                 self.go(getattr(self, "_grades_from", "MENU") or "MENU", "")
+            elif tag == "ft_done":
+                self._start_year_exam()
             elif tag == "menu_back":
                 self.go("MENU", "")
             elif tag == "quit":
@@ -1908,9 +1974,18 @@ class Game:
             return
 
         if self.state == "EXAM":
+            if getattr(self, "_cheat_rect", None) and self._cheat_rect.collidepoint(pos):
+                self._use_cheat()
+                return
             for key, rect in (self._help_rects or {}).items():
                 if rect.collidepoint(pos) and self.helps.get(key):
                     self._use_help(key)
+                    return
+
+        if self.state == "FREETIME":
+            for key, (rect, *_rest) in (self._ft_rects or {}).items():
+                if rect.collidepoint(pos):
+                    self._do_freetime(key)
                     return
 
         if self.state == "STORY":
@@ -1921,14 +1996,144 @@ class Game:
             if sc and "choice" not in sc:
                 self._story_advance()
 
+    # ─────────────────────── СВОБОДНОЕ ВРЕМЯ ───────────────────────
+    def _freetime_enter(self):
+        self.ft_left = FREETIME_ACTIONS
+        self.ft_done = []
+        self.ft_skill_bonus = 0
+        y = self.cur_year()
+        self.bg.set_theme(mix(y["theme"], (40, 60, 90), 0.4), y["accent"])
+        self._ft_intro = random.choice(FREETIME_INTRO)
+        self._freetime_ui()
+
+    def _ft_options(self):
+        skill_name = COURSE_SKILL.get(self.cur_year()["num"], ("Позаниматься", ""))[0]
+        return [
+            ("gym", "Тренажёрка с Юлей", J,
+             "+энергия, немного уверенности", CHARACTER_COLORS[J]),
+            ("skill", skill_name, None,
+             "шпаргалка на экзамене · −энергия", (150, 200, 255)),
+            ("coffee", "Кофе с девочками", None,
+             "+уверенность · −энергия", (255, 190, 110)),
+            ("relax", "Просто отдохнуть", None,
+             "много энергии · немного увер.", (170, 230, 180)),
+        ]
+
+    def _freetime_ui(self):
+        self.buttons = []
+        opts = self._ft_options()
+        self._ft_rects = {}
+        top = 300
+        for i, (key, label, who, sub, col) in enumerate(opts):
+            row = i // 2
+            coln = i % 2
+            rect = pygame.Rect(190 + coln * 470, top + row * 150, 430, 128)
+            self._ft_rects[key] = (rect, col, label, sub, who)
+        self.buttons.append(Button((W // 2 - 140, H - 92, 280, 50),
+                                   "Готовиться к экзамену →", GOLD, 20, tag="ft_done"))
+
+    def _do_freetime(self, key):
+        if key in self.ft_done or self.ft_left <= 0:
+            return
+        y = self.cur_year()
+        self.ft_done.append(key)
+        self.ft_left -= 1
+        self.sfx.play("click")
+
+        if key == "gym":
+            self.energy = clamp(self.energy + 25, 0, 100)
+            self.confidence = clamp(self.confidence + 5, 0, 100)
+            self.gym_count = getattr(self, "gym_count", 0) + 1
+            if self.gym_count >= 3:
+                self.grant("athlete")
+            self.sfx.play("achieve", 0.6)
+            line = random.choice(YULYA_LINES)
+            self.toasts.push_text(f"{J}: «{line}»", CHARACTER_COLORS[J])
+            self.fx.burst(W // 2, 360, CHARACTER_COLORS[J], 20)
+        elif key == "skill":
+            self.energy = clamp(self.energy - 10, 0, 100)
+            self.ft_skill_bonus += 1
+            nm, desc = COURSE_SKILL.get(y["num"], ("Навык", "Стало чуть легче."))
+            self.sfx.play("page")
+            self.toasts.push_text(f"Навык прокачан: {desc} (+шпаргалка)", (150, 200, 255))
+            self.fx.burst(W // 2, 360, (150, 200, 255), 18)
+        elif key == "coffee":
+            self.energy = clamp(self.energy - 10, 0, 100)
+            self.confidence = clamp(self.confidence + 15, 0, 100)
+            self.toasts.push_text(random.choice(FREETIME_REPLIES["coffee"]), (255, 190, 110))
+            self.fx.burst(W // 2, 360, (255, 190, 110), 18)
+        elif key == "relax":
+            self.energy = clamp(self.energy + 30, 0, 100)
+            self.confidence = clamp(self.confidence - 5, 0, 100)
+            self.toasts.push_text(random.choice(FREETIME_REPLIES["relax"]), (170, 230, 180))
+            self.fx.burst(W // 2, 360, (170, 230, 180), 18)
+
+        if self.ft_left <= 0:
+            for b in self.buttons:
+                if b.tag == "ft_done":
+                    b.text = "Пора на экзамен →"
+
+    def draw_freetime(self, s):
+        y = self.cur_year()
+        self._mini_hud(s)
+        draw_text(s, "СВОБОДНОЕ ВРЕМЯ", F(34, True), mix(CREAM, y["accent"], 0.4),
+                  W // 2, 70, center=True)
+        draw_text(s, f"{y['title']} · перед экзаменом", F(16), DIM, W // 2, 106, center=True)
+        draw_text(s, self._ft_intro, F(19), mix(CREAM, y["accent"], 0.25),
+                  W // 2, 150, center=True)
+
+        # индикатор оставшихся действий
+        label = "действий осталось:"
+        draw_text(s, label, F(15), DIM, W // 2 - 70, 196, center=True)
+        for i in range(FREETIME_ACTIONS):
+            col = GOLD if i < self.ft_left else (60, 64, 84)
+            cx = W // 2 + 30 + i * 30
+            pygame.draw.circle(s, col, (cx, 200), 9)
+            if i < self.ft_left:
+                pygame.draw.circle(s, mix(GOLD, WHITE, 0.4), (cx, 200), 9, 2)
+
+        mouse = pygame.mouse.get_pos()
+        for key, (rect, col, label, sub, who) in self._ft_rects.items():
+            used = key in self.ft_done
+            can = (self.ft_left > 0) and not used
+            hov = rect.collidepoint(mouse) and can
+            base = mix((24, 26, 40), col, 0.16 if not used else 0.05)
+            if used:
+                base = (26, 30, 40)
+            bord = col if can else (60, 64, 82)
+            if hov:
+                glow_circle(s, rect.center, rect.height // 2, col, strength=34, layers=3)
+            panel(s, rect, base, radius=16, alpha=245, border=bord, bw=2)
+
+            if who:
+                img = self.por.get(who, 68)
+                s.blit(img, (rect.x + 18, rect.centery - 34))
+                tx = rect.x + 100
+            else:
+                tx = rect.x + 24
+            tcol = CREAM if can else (110, 114, 132)
+            draw_text(s, label, F(21, True), tcol, tx, rect.y + 34)
+            draw_text(s, sub, F(14), DIM if can else (86, 90, 108), tx, rect.y + 68)
+            if used:
+                draw_text(s, "✓ сделано", F(15, True), (120, 200, 150),
+                          rect.right - 110, rect.bottom - 30)
+
+        if self.ft_skill_bonus:
+            draw_text(s, f"шпаргалок на экзамен: +{self.ft_skill_bonus}", F(15, True),
+                      (150, 200, 255), W // 2, H - 118, center=True)
+
     def _year_story_done(self):
         y = self.cur_year()
         if y["exam"]:
-            exam = dict(y["exam"])
-            exam["questions"] = exam_builder.build_year_exam(y)
-            self.start_exam(exam, y["accent"], 3)
+            self.go("FREETIME", "")
         else:
-            self._launch_final(0)
+            self.start_story(PREFINAL_SCENES, lambda: self._launch_final(0), "")
+
+    def _start_year_exam(self):
+        y = self.cur_year()
+        exam = dict(y["exam"])
+        exam["questions"] = exam_builder.build_year_exam(y)
+        self.start_exam(exam, y["accent"], 3)
 
     # ─────────────────────── ЦИКЛ ───────────────────────
     def run(self):
@@ -2040,9 +2245,11 @@ class Game:
                 self.draw_grades(s)
             elif self.state == "GALLERY":
                 self.draw_gallery(s)
+            elif self.state == "FREETIME":
+                self.draw_freetime(s)
 
             if self.state in ("MENU", "MAP", "LETTER", "INPUT", "THANKS",
-                              "RESULT", "ACH", "GRADES", "GALLERY"):
+                              "RESULT", "ACH", "GRADES", "GALLERY", "FREETIME"):
                 for b in self.buttons:
                     b.draw(s)
 

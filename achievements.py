@@ -10,7 +10,8 @@ ACHIEVEMENTS = {
     "friends": {"title": "Не одна", "desc": "Настя стала подругой", "icon": "people"},
     "doctor": {"title": "Ты — врач", "desc": "Пройдены все шесть лет", "icon": "cross"},
     "perfectionist": {"title": "Красный диплом", "desc": "Пять экзаменов подряд без ошибок", "icon": "trophy"},
+    "athlete": {"title": "В здоровом теле", "desc": "Три тренировки с Юлей за игру", "icon": "spark"},
 }
 
 ACH_ORDER = ["first_exam", "flawless", "night_watch", "survivor", "pharma",
-             "friends", "burnout", "speed", "perfectionist", "doctor"]
+             "friends", "burnout", "speed", "athlete", "perfectionist", "doctor"]
